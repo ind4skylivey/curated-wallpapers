@@ -1,0 +1,11 @@
+# Git LFS - Track large image files
+*.jpg filter=lfs diff=lfs merge=lfs -text
+*.jpeg filter=lfs diff=lfs merge=lfs -text
+*.png filter=lfs diff=lfs merge=lfs -text
+*.webp filter=lfs diff=lfs merge=lfs -text
+# Keep text files as text
+*.md text
+*.sh text eol=lf
+*.yml text
+*.yaml text
+*.json text

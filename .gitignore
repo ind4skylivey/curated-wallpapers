@@ -1,0 +1,29 @@
+# System files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*~
+
+# Editor files
+.vscode/
+.idea/
+
+# Cache
+__pycache__/
+.cache/
+*.pyc
+
+# Backups
+*.bak
+*.backup
+
+# Generated files
+thumbnails/.cache/
+.thumbnail_cache/
+
+# Logs
+*.log
+
+# OS specific
+desktop.ini
