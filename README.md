@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎨 Aesthetic Wallpapers
+# 🎨 Curated Wallpapers
 
 ### *A curated collection of 147 wallpapers for your desktop*
 
