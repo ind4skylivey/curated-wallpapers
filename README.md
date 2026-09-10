@@ -227,7 +227,7 @@ While this is a personal collection, contributions are welcome!
 
 ## 📜 License
 
-This collection is licensed under the **MIT License** - see [LICENSE](LICENSE) file for details.
+This collection is licensed under the **GPL-3.0-or-later** - see [LICENSE](LICENSE) file for details.
 
 ### Attribution
 
