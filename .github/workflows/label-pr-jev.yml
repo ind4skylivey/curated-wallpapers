@@ -1,0 +1,194 @@
+name: Label PR with Jev Choice
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  classify-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff metrics
+        id: metrics
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Fetch PR diff stats
+          PR_DATA=$(gh pr view $PR_NUMBER --json files,commits,additions,deletions --jq .)
+          
+          # Extract metrics
+          FILES_CHANGED=$(echo "$PR_DATA" | jq '.files | length')
+          ADDITIONS=$(echo "$PR_DATA" | jq '.additions')
+          DELETIONS=$(echo "$PR_DATA" | jq '.deletions')
+          TOTAL_CHANGES=$((ADDITIONS + DELETIONS))
+          
+          echo "files_changed=$FILES_CHANGED" >> $GITHUB_OUTPUT
+          echo "additions=$ADDITIONS" >> $GITHUB_OUTPUT
+          echo "deletions=$DELETIONS" >> $GITHUB_OUTPUT
+          echo "total_changes=$TOTAL_CHANGES" >> $GITHUB_OUTPUT
+          
+          # Classification: size based on total lines changed
+          if [ $TOTAL_CHANGES -lt 50 ]; then
+            SIZE_CLASS="xs"
+          elif [ $TOTAL_CHANGES -lt 200 ]; then
+            SIZE_CLASS="s"
+          elif [ $TOTAL_CHANGES -lt 500 ]; then
+            SIZE_CLASS="m"
+          else
+            SIZE_CLASS="l"
+          fi
+          
+          echo "size_class=$SIZE_CLASS" >> $GITHUB_OUTPUT
+          echo "PR metrics: $FILES_CHANGED files, +$ADDITIONS/-$DELETIONS lines (total: $TOTAL_CHANGES)"
+
+      - name: Build PR context for Jev
+        id: context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Get PR title and description
+          PR_DATA=$(gh pr view $PR_NUMBER --json title,body,author,files --jq .)
+          
+          TITLE=$(echo "$PR_DATA" | jq -r '.title')
+          BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
+          AUTHOR=$(echo "$PR_DATA" | jq -r '.author.login')
+          FILES=$(echo "$PR_DATA" | jq -r '.files[].name' | tr '\n' ', ' | sed 's/,$//')
+          
+          # Build compact state for API
+          STATE="PR Title: $TITLE
+Author: $AUTHOR
+Files Changed: $FILES
+Size: ${{ steps.metrics.outputs.size_class }} (total ${{ steps.metrics.outputs.total_changes }} lines)
+Description: ${BODY:0:300}"
+          
+          # Escape for JSON
+          STATE_JSON=$(echo "$STATE" | jq -Rs .)
+          echo "state=$STATE_JSON" >> $GITHUB_OUTPUT
+
+      - name: Classify with Jev Choice API
+        id: classify
+        if: vars.TYPESAFE_API_KEY != '' || secrets.TYPESAFE_API_KEY != ''
+        continue-on-error: true
+        run: |
+          API_KEY="${{ secrets.TYPESAFE_API_KEY }}"
+          
+          if [ -z "$API_KEY" ]; then
+            echo "warning: TYPESAFE_API_KEY not configured, skipping Jev classification"
+            echo "risk=unknown" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Build Jev API request with two Choice questions
+          PAYLOAD=$(cat <<'EOF'
+          {
+            "model": "jev-latest",
+            "state": $STATE,
+            "questions": {
+              "risk": {
+                "type": "choice",
+                "instructions": "Based on the PR description, files changed, and scope, classify the risk level of this change.",
+                "criteria": {
+                  "low": "Minimal scope, well-documented, tests included, or documentation-only changes",
+                  "medium": "Moderate scope, clear intent, touches non-critical paths, or refactoring with tests",
+                  "high": "Large scope, touches core systems, security/auth changes, or insufficient testing"
+                }
+              },
+              "complexity": {
+                "type": "choice",
+                "instructions": "Classify the apparent complexity of understanding and reviewing this PR.",
+                "criteria": {
+                  "low": "Straightforward changes, single concern, easy to review",
+                  "medium": "Multiple concerns or moderate scope, requires careful review",
+                  "high": "Complex logic, distributed changes, or requires deep domain knowledge"
+                }
+              }
+            }
+          }
+          EOF
+          )
+          
+          # Substitute state variable
+          PAYLOAD=$(echo "$PAYLOAD" | jq --argjson STATE "${{ steps.context.outputs.state }}" '.state = $STATE')
+          
+          echo "Sending request to Jev API..."
+          RESPONSE=$(curl -s -X POST https://api.typesafe.ai/v1/systemone \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+          
+          # Check for errors
+          if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+            ERROR=$(echo "$RESPONSE" | jq -r '.error.message // .error')
+            echo "warning: Jev API error: $ERROR"
+            echo "risk=unknown" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Extract answers
+          RISK=$(echo "$RESPONSE" | jq -r '.answers.risk.choice // "unknown"')
+          COMPLEXITY=$(echo "$RESPONSE" | jq -r '.answers.complexity.choice // "unknown"')
+          
+          echo "risk=$RISK" >> $GITHUB_OUTPUT
+          echo "complexity=$COMPLEXITY" >> $GITHUB_OUTPUT
+          echo "Jev classification: risk=$RISK, complexity=$COMPLEXITY"
+
+      - name: Apply labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          LABELS=""
+          
+          # Size labels (deterministic from metrics)
+          SIZE="${{ steps.metrics.outputs.size_class }}"
+          LABELS="$LABELS jev:size-$SIZE"
+          
+          # Risk labels (from Jev, fallback to unknown)
+          RISK="${{ steps.classify.outputs.risk }}"
+          if [ -n "$RISK" ] && [ "$RISK" != "unknown" ]; then
+            LABELS="$LABELS jev:risk-$RISK"
+          fi
+          
+          # Complexity labels (optional, informational)
+          COMPLEXITY="${{ steps.classify.outputs.complexity }}"
+          if [ -n "$COMPLEXITY" ] && [ "$COMPLEXITY" != "unknown" ]; then
+            LABELS="$LABELS jev:complexity-$COMPLEXITY"
+          fi
+          
+          # Apply labels
+          for label in $LABELS; do
+            echo "Adding label: $label"
+            gh pr edit $PR_NUMBER --add-label "$label" || true
+          done
+
+      - name: Comment on PR (optional)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        continue-on-error: true
+        run: |
+          SIZE="${{ steps.metrics.outputs.size_class }}"
+          RISK="${{ steps.classify.outputs.risk }}"
+          TOTAL="${{ steps.metrics.outputs.total_changes }}"
+          
+          COMMENT="### PR Classification
+          
+- **Size**: \`jev:size-$SIZE\` ($TOTAL lines changed)
+- **Risk**: \`jev:risk-$RISK\`"
+          
+          if [ "$RISK" = "unknown" ]; then
+            COMMENT="$COMMENT
+- ℹ️ Risk assessment not available (TYPESAFE_API_KEY not configured)"
+          fi
+          
+          echo "$COMMENT" | gh pr comment $PR_NUMBER -F -
